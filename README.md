@@ -52,7 +52,24 @@ Copy `.env.example` values into your shell or deployment environment as needed:
 
 For a public deployment, set `PUBLIC_BASE_URL` to the external HTTPS origin and deploy behind HTTPS. If multiple server instances are used, room state and temporary files need a shared session/storage service; this MVP keeps rooms in process memory and is intended for a single instance.
 
-**Vercel note:** removing conversion removes the LibreOffice dependency, but it does not make this full-stack app deployable as a Vercel-only project. The Express + Socket.IO room server uses live in-memory room state and temporary files. Deploy the complete app to a persistent Node/Docker host (or keep Vercel as a frontend and configure a separate persistent backend, storage, and remote Socket.IO origin). Standard Vercel Functions also impose a 4.5 MB request/response body limit, so the current 75 MB upload endpoint should not be routed through a Vercel Function. See [Vercel's function limits](https://vercel.com/docs/functions/limitations).
+### Vercel deployment (frontend) + persistent API backend
+
+The screenshot error `Something went wrong` with a 404 happens when Vercel serves the Vite frontend but `/api/rooms` is not present on that deployment. This project uses an Express API, in-memory room sessions, disk-backed temporary uploads, and Socket.IO; these are not created by deploying the static `dist` folder alone.
+
+Recommended split deployment:
+
+1. Deploy the `ppt-presenter` folder to Vercel as a Vite app (Build command `npm run build`, Output Directory `dist`). The included `vercel.json` rewrites `/present/:roomId` and `/upload/:roomId` to the SPA entry point.
+2. Deploy the same project as a persistent Node/Docker web service on Render, Railway, or a university server. Use the included `Dockerfile`; do not deploy only `dist` as the backend.
+3. On the backend host, set `PUBLIC_BASE_URL` to the HTTPS backend origin, `PUBLIC_APP_URL` to the HTTPS Vercel origin, and `FRONTEND_ORIGINS` to the allowed Vercel origin (comma-separated if there are multiple domains).
+4. In Vercel → Project → Settings → Environment Variables, set these **build-time** variables to the backend/frontend origins (no trailing slash):
+
+   - `VITE_API_BASE_URL=https://your-room-presenter-api.onrender.com`
+   - `VITE_SOCKET_URL=https://your-room-presenter-api.onrender.com`
+   - `VITE_PUBLIC_APP_URL=https://your-room-presenter.vercel.app`
+
+5. Redeploy Vercel after setting the variables. Test the backend directly at `https://your-room-presenter-api.onrender.com/api/health`; it should return JSON such as `{"ok":true,...}`. Then click Start a presentation on the Vercel site. QR links should use the Vercel origin, while uploads, deck downloads, and Socket.IO use the backend origin.
+
+Use the exact origins shown in your deployments rather than the example hostnames. Keep one backend instance for this MVP because room state is in memory; restarting the backend expires active rooms and its temporary files. The 75 MB upload is sent directly to the persistent backend, not through a Vercel Function (which has a 4.5 MB request/response limit). See [Vercel function limits](https://vercel.com/docs/functions/limitations).
 
 ## Docker
 
@@ -88,7 +105,7 @@ PDF uploads are rendered directly with PDF.js. `.ppt` and `.pptx` uploads are pa
 
 ## Chalkboard presenter UI and PowerPoint text fix
 
-- The board presenter route uses the provided green chalkboard / wooden-frame asset (`public/chalkboard-frame.webp`) as its full-screen surface. Before a deck arrives, the board shows the QR and local-upload options. Once a deck is loaded, those left upload/QR cards disappear and the main slide + thumbnail strip expands to occupy that space, while the right-side chalk remote remains visible on desktop. The top-bar invite action can reopen the QR modal for replacements; the bottom Replace control supports a local replacement. Compact layouts hide the remote rail on narrow screens and preserve the central slide controls.
+- The board presenter route uses the provided green chalkboard / wooden-frame asset (`public/chalkboard-frame.webp`) as its full-screen surface. Before a deck arrives, the board shows the QR and local-upload options. Once a deck is loaded, the upload/QR rail and thumbnail filmstrip are hidden so the current slide can use the available canvas; the right-side chalk remote retains navigation, zoom, fit-to-screen, reset, and replace actions. The top-bar invite action can reopen the QR modal for replacements. Compact layouts adapt the controls for narrow screens.
 - Fixed missing PowerPoint text: Web-PPT uses SVG `foreignObject` elements for browser-native text layout. The previous sanitizer deleted all `foreignObject` nodes, removing text from every affected slide. The sanitizer now preserves them while stripping script/object/embed nodes, event handlers, and untrusted external resource references.
 - The chalkboard background is a compressed WebP derivative of the user-supplied blank board image. No external font assets or analytics are loaded.
 

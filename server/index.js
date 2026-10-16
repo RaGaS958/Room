@@ -17,6 +17,12 @@ const MAX_UPLOAD_MB = Math.max(1, Number(process.env.MAX_UPLOAD_MB || 75));
 const ROOM_TTL_HOURS = Math.max(1, Number(process.env.ROOM_TTL_HOURS || 3));
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(PROJECT_DIR, '.runtime'));
 const ALLOWED_EXTENSIONS = new Set(['.ppt', '.pptx', '.pdf']);
+const FRONTEND_ORIGINS = String(process.env.FRONTEND_ORIGINS || process.env.PUBLIC_APP_URL || '')
+  .split(',').map((value) => value.trim().replace(/\/+$/, '')).filter(Boolean);
+
+function originIsAllowed(origin) {
+  return !origin || FRONTEND_ORIGINS.length === 0 || FRONTEND_ORIGINS.includes(origin.replace(/\/+$/, ''));
+}
 const ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 
 function randomToken(length = 10) {
@@ -55,19 +61,20 @@ function baseUrlForRequest(req) {
 }
 
 function roomPayload(room, req) {
-  const baseUrl = baseUrlForRequest(req);
+  const apiBaseUrl = baseUrlForRequest(req);
+  const appBaseUrl = (process.env.PUBLIC_APP_URL || apiBaseUrl).trim().replace(/\/+$/, '');
   return {
     roomId: room.id,
     createdAt: room.createdAt,
     expiresAt: room.expiresAt,
-    uploadUrl: `${baseUrl}/upload/${room.id}`,
-    presentUrl: `${baseUrl}/present/${room.id}`,
+    uploadUrl: `${appBaseUrl}/upload/${room.id}`,
+    presentUrl: `${appBaseUrl}/present/${room.id}`,
     deck: room.deck ? {
       deckId: room.deck.deckId,
       title: room.deck.title,
       originalName: room.deck.originalName,
       uploadedAt: room.deck.uploadedAt,
-      fileUrl: `/api/decks/${room.deck.deckId}`,
+      fileUrl: `${apiBaseUrl}/api/decks/${room.deck.deckId}`,
       fileType: room.deck.fileType,
     } : null,
   };
@@ -112,11 +119,28 @@ export function createRuntime({ dataDir = DATA_DIR, serveClient = true } = {}) {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    const origin = req.headers.origin;
+    if (origin && originIsAllowed(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    }
+    if (req.method === 'OPTIONS') {
+      if (!originIsAllowed(origin)) return res.status(403).end();
+      return res.status(204).end();
+    }
+    if (origin && !originIsAllowed(origin)) {
+      return res.status(403).json({ error: 'This frontend origin is not allowed. Add it to FRONTEND_ORIGINS on the backend.' });
+    }
     next();
   });
 
   const server = http.createServer(app);
-  const io = new SocketServer(server, { maxHttpBufferSize: 1e6 });
+  const io = new SocketServer(server, {
+    maxHttpBufferSize: 1e6,
+    cors: { origin: FRONTEND_ORIGINS.length ? FRONTEND_ORIGINS : true, methods: ['GET', 'POST'] },
+  });
   const rooms = new Map();
   const decks = new Map();
   const upload = multer({
@@ -194,7 +218,7 @@ export function createRuntime({ dataDir = DATA_DIR, serveClient = true } = {}) {
           decks.delete(oldDeck.deckId);
           await removeDir(path.join(dataDir, 'decks', oldDeck.deckId));
         }
-        const publicDeck = { deckId, title: deck.title, originalName: deck.originalName, uploadedAt: deck.uploadedAt, fileUrl: `/api/decks/${deckId}`, fileType: deck.fileType };
+        const publicDeck = { deckId, title: deck.title, originalName: deck.originalName, uploadedAt: deck.uploadedAt, fileUrl: `${baseUrlForRequest(req)}/api/decks/${deckId}`, fileType: deck.fileType };
         io.to(room.id).emit('deck-ready', publicDeck);
         res.status(201).json({ ok: true, deck: publicDeck, message: 'Your deck is ready on the presentation board.' });
       } catch (error) {

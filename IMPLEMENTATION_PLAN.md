@@ -115,3 +115,13 @@ User-provided screenshot marks the target canvas to expand across the old left u
 - Added narrow-screen overrides so the presentation canvas occupies the available viewport without reserved thumbnail/footer rows.
 - Static validation passed: TypeScript JSX transpilation, CSS brace balance, and checks that the filmstrip/footer are not rendered.
 - Full app build/browser E2E not run in this environment because project npm dependencies are not installed.
+
+
+## Vercel 404 diagnosis and backend-origin configuration (2026-10-16)
+
+- The landing page's Start action posted to the relative `/api/rooms` endpoint. On a frontend-only Vercel deployment, no Express route existed at that path, so Vercel returned HTML 404 and the UI fell back to a generic error.
+- Added Vite build-time configuration via `VITE_API_BASE_URL`, `VITE_SOCKET_URL`, and `VITE_PUBLIC_APP_URL`. Room creation/lookups, uploads, downloads, and Socket.IO can now connect to a separate persistent backend; QR/present links can use the Vercel origin.
+- Added Express CORS handling and Socket.IO CORS configuration using `FRONTEND_ORIGINS`; configured origin mismatch returns a specific backend error.
+- Added `vercel.json` SPA rewrites for `/present/:roomId` and `/upload/:roomId` direct links.
+- The client now shows an actionable message if the frontend is deployed without its API backend rather than a generic “Something went wrong”.
+- Validation completed: `node --check server/index.js`; JSX transpilation with TypeScript's JSX transpiler; `tinycss2` stylesheet parsing; `vercel.json` JSON validation. Full Vite build and runtime/socket tests remain unexecuted because dependencies are not installed in this environment.

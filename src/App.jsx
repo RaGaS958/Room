@@ -13,6 +13,36 @@ import {
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString();
 
 const MAX_FILE_BYTES = 75 * 1024 * 1024;
+// On Vercel, set these at build time to the public origin of the persistent
+// Node/Socket.IO backend. Leave them blank for local same-origin development.
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
+const SOCKET_BASE_URL = (import.meta.env.VITE_SOCKET_URL || API_BASE_URL).trim().replace(/\/+$/, '');
+const PUBLIC_APP_URL = (import.meta.env.VITE_PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
+
+function apiUrl(path) {
+  if (/^https?:\/\//i.test(String(path || ''))) return String(path);
+  const suffix = String(path || '').startsWith('/') ? String(path) : `/${path}`;
+  return `${API_BASE_URL}${suffix}`;
+}
+
+function roomSocket() {
+  const options = { transports: ['websocket', 'polling'] };
+  return SOCKET_BASE_URL ? io(SOCKET_BASE_URL, options) : io(options);
+}
+
+function normalizeRoomPayload(payload) {
+  if (!payload) return payload;
+  const roomId = payload.roomId;
+  return {
+    ...payload,
+    uploadUrl: PUBLIC_APP_URL && roomId ? `${PUBLIC_APP_URL}/upload/${roomId}` : payload.uploadUrl,
+    presentUrl: PUBLIC_APP_URL && roomId ? `${PUBLIC_APP_URL}/present/${roomId}` : payload.presentUrl,
+    deck: payload.deck ? {
+      ...payload.deck,
+      fileUrl: apiUrl(payload.deck.fileUrl || `/api/decks/${payload.deck.deckId}`),
+    } : null,
+  };
+}
 
 function Brand({ compact = false }) {
   return (
@@ -34,9 +64,29 @@ function fileType(name = '') {
 }
 
 async function apiJson(url, options = {}) {
-  const response = await fetch(url, { cache: 'no-store', ...options });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || 'Something went wrong. Please try again.');
+  let response;
+  try {
+    response = await fetch(apiUrl(url), { cache: 'no-store', ...options });
+  } catch (error) {
+    if (API_BASE_URL) {
+      throw new Error(`Cannot reach the Room Presenter backend at ${API_BASE_URL}. Check that the backend is running and its CORS allowlist includes this Vercel domain.`);
+    }
+    throw error;
+  }
+  const contentType = response.headers.get('content-type') || '';
+  const body = contentType.includes('application/json') ? await response.json().catch(() => ({})) : {};
+  if (!response.ok) {
+    if (!contentType.includes('application/json')) {
+      if (!API_BASE_URL && /(^|\.)vercel\.app$/i.test(window.location.hostname)) {
+        throw new Error('The Vercel frontend is running, but its Room Presenter API is not connected. Deploy server/index.js to a persistent Node host, then set VITE_API_BASE_URL and VITE_SOCKET_URL in Vercel and redeploy.');
+      }
+      throw new Error(`The Room Presenter API returned HTTP ${response.status} without JSON. Check VITE_API_BASE_URL and the backend deployment.`);
+    }
+    throw new Error(body.error || `The Room Presenter API returned HTTP ${response.status}. Please try again.`);
+  }
+  if (!contentType.includes('application/json')) {
+    throw new Error('The Room Presenter backend did not return JSON. Check VITE_API_BASE_URL in your deployment settings.');
+  }
   return body;
 }
 
@@ -162,14 +212,15 @@ function UploadPage({ roomId }) {
 
   useEffect(() => {
     let active = true;
-    apiJson(`/api/rooms/${encodeURIComponent(roomId)}`).then((payload) => {
+    apiJson(`/api/rooms/${encodeURIComponent(roomId)}`).then((rawPayload) => {
       if (!active) return;
+      const payload = normalizeRoomPayload(rawPayload);
       setRoom(payload);
       setRemoteDeck(payload.deck || null);
       if (payload.deck) setMobilePanel('remote');
     }).catch((err) => { if (active) setError(err.message); });
 
-    const socket = io({ transports: ['websocket', 'polling'] });
+    const socket = roomSocket();
     socketRef.current = socket;
     socket.on('connect', () => {
       setSocketConnected(true);
@@ -211,7 +262,7 @@ function UploadPage({ roomId }) {
     const formData = new FormData();
     formData.append('file', file);
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/rooms/${encodeURIComponent(roomId)}/upload`);
+    xhr.open('POST', apiUrl(`/api/rooms/${encodeURIComponent(roomId)}/upload`));
     xhr.responseType = 'json';
     xhr.upload.onprogress = (event) => { if (event.lengthComputable) setProgress(Math.round((event.loaded / event.total) * 100)); };
     xhr.onload = () => {
@@ -223,7 +274,7 @@ function UploadPage({ roomId }) {
       }
       setUploading(false);
     };
-    xhr.onerror = () => { setError('Connection lost. Make sure you are on the same network and try again.'); setUploading(false); };
+    xhr.onerror = () => { setError(API_BASE_URL ? `Upload could not reach ${API_BASE_URL}. Check the backend URL and FRONTEND_ORIGINS/CORS settings.` : 'Connection lost. Make sure you are on the same network and try again.'); setUploading(false); };
     xhr.send(formData);
   };
 
@@ -627,8 +678,8 @@ function Presenter({ roomId }) {
 
   useEffect(() => {
     let active = true;
-    apiJson(`/api/rooms/${encodeURIComponent(roomId)}`).then((payload) => { if (active) setRoom(payload); }).catch((error) => { if (active) setRoomError(error.message); });
-    const socket = io({ transports: ['websocket', 'polling'] });
+    apiJson(`/api/rooms/${encodeURIComponent(roomId)}`).then((rawPayload) => { if (active) setRoom(normalizeRoomPayload(rawPayload)); }).catch((error) => { if (active) setRoomError(error.message); });
+    const socket = roomSocket();
     socketRef.current = socket;
     socket.on('connect', () => socket.emit('join-room', { roomId, role: 'presenter' }));
     socket.on('room-state', (payload) => { if (payload?.deck) loadDeck(payload.deck); });
@@ -647,7 +698,7 @@ function Presenter({ roomId }) {
     activeDeckIdRef.current = payload.deckId;
     setLoadingDeck(true); setDeckError(''); setShowInvite(false);
     try {
-      const fileUrl = payload.fileUrl || `/api/decks/${payload.deckId}`;
+      const fileUrl = apiUrl(payload.fileUrl || `/api/decks/${payload.deckId}`);
       const response = await fetch(fileUrl, { cache: 'no-store' });
       if (!response.ok) throw new Error('The uploaded file could not be opened. Send it again from your phone.');
       const data = new Uint8Array(await response.arrayBuffer());
@@ -761,14 +812,14 @@ function Presenter({ roomId }) {
     if (file.size > MAX_FILE_BYTES) { setDeckError('This file is larger than 75 MB.'); return; }
     setLocalUploading(true); setUploadProgress(0); setDeckError('');
     const formData = new FormData(); formData.append('file', file);
-    const xhr = new XMLHttpRequest(); xhr.open('POST', `/api/rooms/${encodeURIComponent(roomId)}/upload`); xhr.responseType = 'json';
+    const xhr = new XMLHttpRequest(); xhr.open('POST', apiUrl(`/api/rooms/${encodeURIComponent(roomId)}/upload`)); xhr.responseType = 'json';
     xhr.upload.onprogress = (event) => { if (event.lengthComputable) setUploadProgress(Math.round(event.loaded / event.total * 100)); };
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) setUploadProgress(100);
       else setDeckError(xhr.response?.error || 'Upload failed.');
       setLocalUploading(false);
     };
-    xhr.onerror = () => { setDeckError('Connection lost while uploading.'); setLocalUploading(false); };
+    xhr.onerror = () => { setDeckError(API_BASE_URL ? `Upload could not reach ${API_BASE_URL}. Check the backend URL and CORS settings.` : 'Connection lost while uploading.'); setLocalUploading(false); };
     xhr.send(formData);
   };
 
